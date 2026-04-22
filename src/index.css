@@ -1,0 +1,137 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    font-family: 'Inter', system-ui, sans-serif;
+    font-size: 18px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Prevent any text selection — kiosk mode */
+  * {
+    -webkit-user-select: none;
+    user-select: none;
+  }
+}
+
+@layer utilities {
+  .touch-safe {
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+  }
+
+  /* Receipt paper texture */
+  .receipt-bg {
+    background-color: #fefdf8;
+    background-image:
+      repeating-linear-gradient(
+        0deg,
+        transparent,
+        transparent 27px,
+        rgba(0,0,0,0.04) 27px,
+        rgba(0,0,0,0.04) 28px
+      );
+  }
+
+  /* Soft card shadow */
+  .card-shadow {
+    box-shadow:
+      0 2px 8px rgba(0,0,0,0.06),
+      0 1px 2px rgba(0,0,0,0.04);
+  }
+
+  .card-shadow-hover {
+    box-shadow:
+      0 8px 24px rgba(0,0,0,0.10),
+      0 2px 6px rgba(0,0,0,0.06);
+  }
+
+  /* Candidate card press state */
+  .card-press:active {
+    transform: scale(0.97);
+    transition: transform 0.08s ease-out;
+  }
+}
+
+/* Animated weight display */
+@keyframes weightSettle {
+  0%   { transform: translateX(-1px); }
+  25%  { transform: translateX(1px); }
+  50%  { transform: translateX(-0.5px); }
+  75%  { transform: translateX(0.5px); }
+  100% { transform: translateX(0); }
+}
+
+.weight-settle {
+  animation: weightSettle 0.3s ease-out;
+}
+
+/* Processing dots */
+@keyframes dotPulse {
+  0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
+  40%           { transform: scale(1);   opacity: 1; }
+}
+
+.dot-1 { animation: dotPulse 1.2s ease-in-out infinite; }
+.dot-2 { animation: dotPulse 1.2s ease-in-out 0.2s infinite; }
+.dot-3 { animation: dotPulse 1.2s ease-in-out 0.4s infinite; }
+
+/* Screen transition */
+@keyframes screenIn {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.screen-enter {
+  animation: screenIn 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* Step icon float */
+@keyframes floatIcon {
+  0%, 100% { transform: translateY(0); }
+  50%       { transform: translateY(-5px); }
+}
+
+.float-1 { animation: floatIcon 3s ease-in-out infinite; }
+.float-2 { animation: floatIcon 3s ease-in-out 0.7s infinite; }
+.float-3 { animation: floatIcon 3s ease-in-out 1.4s infinite; }
+.float-4 { animation: floatIcon 3s ease-in-out 2.1s infinite; }
+
+/* Spinner ring */
+@keyframes spinRing {
+  to { stroke-dashoffset: -283; }
+}
+
+.spinner-ring {
+  stroke-dasharray: 80 283;
+  stroke-dashoffset: 0;
+  animation: spinRing 1.4s linear infinite;
+  transform-origin: center;
+}
+
+/* Confirmation checkmark draw */
+@keyframes drawCheck {
+  from { stroke-dashoffset: 60; }
+  to   { stroke-dashoffset: 0; }
+}
+
+.check-draw {
+  stroke-dasharray: 60;
+  stroke-dashoffset: 60;
+  animation: drawCheck 0.4s 0.2s ease-out forwards;
+}
+
+/* Countdown ring */
+@keyframes countdownShrink {
+  from { stroke-dashoffset: 0; }
+  to   { stroke-dashoffset: 188; }
+}
+
+.countdown-ring {
+  stroke-dasharray: 188;
+  stroke-dashoffset: 0;
+  transform-origin: center;
+  transform: rotate(-90deg);
+}
