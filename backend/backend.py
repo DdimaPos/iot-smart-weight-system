@@ -8,8 +8,8 @@ import numpy as np
 import serial
 import time
 import asyncio
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-import uvicorn
+import websockets
+import json
 
 # -------------------------
 # CONFIG
@@ -20,6 +20,9 @@ CLASS_NAMES = ["Apple A", "Kiwi B", "banana", "orange", "peach", "persimmon", "p
 
 SERIAL_PORT = '/dev/ttyUSB0'
 BAUD_RATE = 9600
+
+WS_HOST = "0.0.0.0"
+WS_PORT = 5000
 
 GST_PIPELINE = (
     "nvarguscamerasrc ! "
@@ -36,7 +39,7 @@ latest_frame = None
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 # -------------------------
-# MODEL SETUP
+# MODEL
 # -------------------------
 print("Loading model...")
 model = models.mobilenet_v3_large(weights=None)
@@ -119,53 +122,52 @@ def classify_image(frame):
         })
 
     return {"predictions": predictions}
-
 # -------------------------
-# FASTAPI SETUP
+# WEBSOCKET SERVER
 # -------------------------
-app = FastAPI()
+async def handler(websocket, path):
+    if path != "/communication":
+        print(f"Rejected connection on path: {path}")
+        await websocket.close(code=1008, reason="Invalid path")
+        return
 
-clients = set()
-
-@app.websocket("/communication")
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    clients.add(websocket)
-
-    print("Client connected")
+    print("Client connected on /communication")
 
     try:
         while True:
-            # Non-blocking receive
+            # Try to receive message (non-blocking)
             try:
-                data = await asyncio.wait_for(websocket.receive_json(), timeout=0.01)
+                message = await asyncio.wait_for(websocket.recv(), timeout=0.01)
+                data = json.loads(message)
             except asyncio.TimeoutError:
                 data = None
 
-            # Handle incoming messages
+            # Handle incoming
             if data:
+                print(f"data type: {data.get('type')}")
                 if data.get("type") == "classify":
                     if latest_frame is not None:
+                        print("Starting classifying...")
                         result = classify_image(latest_frame)
 
-                        await websocket.send_json({
+                        print(f"Sending result: {result}")
+                        await websocket.send(json.dumps({
                             "type": "classify",
                             "body": result
-                        })
+                        }))
 
-            # Always stream weight
-            await websocket.send_json({
+            # Always send weight
+            await websocket.send(json.dumps({
                 "type": "weigh",
                 "body": {
                     "weight": current_weight
                 }
-            })
+            }))
 
             await asyncio.sleep(0.1)
 
-    except WebSocketDisconnect:
+    except websockets.exceptions.ConnectionClosed:
         print("Client disconnected")
-        clients.remove(websocket)
 
 # -------------------------
 # START THREADS
@@ -174,7 +176,11 @@ threading.Thread(target=weight_worker, daemon=True).start()
 threading.Thread(target=camera_worker, daemon=True).start()
 
 # -------------------------
-# RUN SERVER
+# RUN SERVER (Python 3.6 SAFE)
 # -------------------------
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=5000)
+loop = asyncio.get_event_loop()
+server = websockets.serve(handler, WS_HOST, WS_PORT)
+
+loop.run_until_complete(server)
+print(f"WebSocket server running on ws://{WS_HOST}:{WS_PORT}")
+loop.run_forever()
