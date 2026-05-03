@@ -1,12 +1,13 @@
-# Dependencies
-node_modules/
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+frontend/.vite/
 
-# Build output
-dist/
-dist-ssr/
-
-# Vite cache
-.vite/
+# Backend
+backend/__pycache__/
+backend/*.pyc
+backend/.venv/
 
 # Environment variables
 .env

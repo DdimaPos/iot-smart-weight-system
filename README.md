@@ -1,125 +1,168 @@
-# Cântar Inteligent — Casă de Plată
+# Smart Scale System — Intelligent Checkout
 
-Interfață kiosk touchscreen pentru cântare inteligente IoT la casele de plată self-service din supermarket. Rulează în browser pe un NVIDIA Jetson Nano conectat la un ecran tactil de 13 inch.
+A touchscreen interface for IoT smart scales at self-service supermarket checkouts. A CNN model (MobileNetV3) running on an NVIDIA
+Jetson Nano identifies fruits and vegetables by weight and camera image, and displays the top candidates to the user for confirmation.
 
-Fluxul de funcționare:
-1. Clientul plasează un fruct sau legumă pe cântar
-2. Greutatea se stabilizează → camera capturează imaginea → rețeaua CNN MobileNet clasifică produsul
-3. Interfața afișează primele 3–5 produse candidat cu scoruri de încredere
-4. Clientul apasă pe produsul său → se tipărește chitanța
+## How it works
 
----
+1. Customer places a fruit or vegetable on the scale
+2. Weight stabilizes, the camera captures an image, the AI model classifies the product
+3. The interface shows the top 3 candidate products with confidence scores
+4. Customer taps their product to confirm and get a receipt
 
-## Tehnologii folosite
+## Architecture
 
-- **React 18** + **Vite 5**
-- **Tailwind CSS 3**
-- State machine cu `useState` + `useEffect` (IDLE → WEIGHING → CANDIDATES → CONFIRMED)
-- Backend simulat în browser (fără hardware real)
-
----
-
-## Cum lansezi proiectul
-
-### Cerințe prealabile
-
-- [Node.js](https://nodejs.org/) versiunea 18 sau mai nouă
-- npm (inclus cu Node.js)
-
-### 1. Clonează sau descarcă proiectul
-
-```bash
-git clone <url-repository>
-cd iot-smart-weight-system
+```
+Hardware (serial scale + camera)
+        |
+   backend/backend.py        (FastAPI + WebSocket, port 5000)
+        |  WebSocket ws://localhost:5000/communication
+        |
+   frontend/                  (React + Vite, port 5173)
 ```
 
-### 2. Instalează dependențele
+The backend streams weight readings to the frontend over WebSocket at ~10 Hz. When the frontend detects a stable weight, it sends a `classify` request. The backend runs inference on the current camera frame and returns the top 4 predictions with confidence percentages.
+
+## Prerequisites
+
+- **Python 3.8+** with pip
+- **Node.js 18+** with npm
+- For full hardware mode: NVIDIA Jetson Nano with serial scale (`/dev/ttyUSB0`) and CSI camera
+- Model weights file `mobilenetv3_final.pth` placed inside `backend/`
+
+## Project Setup
+
+You need **2 terminal windows** — one for the backend, one for the frontend.
+
+### Terminal 1 — Backend
 
 ```bash
+cd backend
+
+# Create and activate a virtual environment
+python -m venv venv
+source venv/bin/activate   # On Windows: venv\Scripts\activate
+
+# Install Python dependencies
+pip install -r requirements.txt
+
+# Run the backend server
+python backend.py
+```
+
+The backend starts at `http://localhost:5000` with the WebSocket endpoint at `ws://localhost:5000/communication`.
+
+> **Note:** On the Jetson Nano, `torch` and `torchvision` should be installed via NVIDIA's PyTorch wheels for ARM/CUDA support, not from PyPI directly.
+
+### Terminal 2 — Frontend
+
+```bash
+cd frontend
+
+# Install Node dependencies
 npm install
-```
 
-### 3. Pornește serverul de dezvoltare
-
-```bash
+# Start the dev server
 npm run dev
 ```
 
-Vite va afișa adresa locală, de obicei:
+Vite will show:
 
 ```
 VITE v5.x  ready in ~500ms
-➜  Local:   http://localhost:5173/
+  -> Local:   http://localhost:5173/
 ```
 
-Deschide acea adresă în browser.
+Open that URL in a browser. When both servers are running, the status badge on the idle screen will show "Connected".
 
-### 4. Folosește panoul Demo
+## Demo Mode (no hardware needed)
 
-- Apasă butonul **🔧 Demo** din colțul stânga-jos
-- Selectează un produs (Măr, Banană, Roșie, Morcov, Strugure)
-- Apasă **▶ Puneți Produsul pe Cântar**
-- Urmărește fluxul complet: Cântărire → Candidați → Chitanță
+If you don't have the Jetson Nano and physical scale:
 
----
+1. Start only the frontend (`npm run dev` in `frontend/`)
+2. Open the browser — the status badge will show "Disconnected"
+3. Click the **Demo** button in the bottom-left corner
+4. Select a product and click the trigger button
+5. The full flow runs with simulated weight and mock classifications
 
-## Build pentru producție (Jetson Nano)
-
-Generează fișierele statice optimizate:
+## Production Build
 
 ```bash
+cd frontend
 npm run build
 ```
 
-Previzualizează build-ul local înainte de deploy:
-
-```bash
-npm run preview
-```
-
-Servește folderul `dist/` pe Jetson Nano:
+This generates optimized static files in `frontend/dist/`. Serve them with any HTTP server:
 
 ```bash
 npx serve dist
 ```
 
-Sau cu orice server HTTP static (nginx, Apache, etc.).
+Or use nginx, Apache, etc. on the Jetson Nano.
 
----
-
-## Structura proiectului
+## Project Structure
 
 ```
 iot-smart-weight-system/
-├── index.html          # Shell HTML (kiosk: fără selecție text, fără meniu contextual)
-├── vite.config.js
-├── tailwind.config.js  # Paletă personalizată: sage (verde) + warm (crem)
-├── postcss.config.js
-└── src/
-    ├── main.jsx        # Entry point React
-    ├── index.css       # Animații CSS (spinner, dots, float, check-draw)
-    └── App.jsx         # Toate componentele și state machine-ul
+├── backend/
+│   └── backend.py              # FastAPI server: camera, serial, model inference, WebSocket
+├── frontend/
+│   ├── index.html              # HTML shell (kiosk mode: no text selection, no context menu)
+│   ├── package.json
+│   ├── vite.config.js
+│   ├── tailwind.config.js      # Custom palette: sage (green) + warm (cream)
+│   ├── postcss.config.js
+│   └── src/
+│       ├── main.jsx            # React entry point
+│       ├── index.css           # Tailwind imports + custom animations
+│       └── App.jsx             # All components and state machine
+└── README.md
 ```
 
-### Componente principale (`App.jsx`)
+## WebSocket Protocol
 
-| Componentă | Rol |
-|------------|-----|
-| `<App />` | Controlorul state machine (IDLE / WEIGHING / CANDIDATES / CONFIRMED) |
-| `<WaitingScreen />` | Ecran inițial cu ghid vizual pas-cu-pas |
-| `<WeighingScreen />` | Afișează greutatea animată + spinner procesare |
-| `<CandidatesScreen />` | Grid cu 4 candidați, timeout 30s, numărătoare inversă |
-| `<ConfirmationScreen />` | Chitanță stilizată + log analytics în consolă |
-| `<DemoPanel />` | Panou dezvoltator pentru simularea fluxului |
+**Weight stream** (backend -> frontend, every ~100ms):
 
----
+```json
+{
+  "type": "weigh",
+  "body": { "weight": 523.5 }
+}
+```
 
-## Produse simulate
+**Classify request** (frontend -> backend):
 
-| Produs | Preț (MDL/kg) |
-|--------|--------------|
-| 🍎 Măr — Red Delicious | 2.80 |
-| 🍌 Banană — Cavendish | 3.50 |
-| 🍅 Roșie — Rotundă | 4.20 |
-| 🥕 Morcov — Portocaliu | 1.90 |
-| 🍇 Strugure — Muscat Alb | 6.00 |
+```json
+{
+  "type": "classify"
+}
+```
+
+**Classify response** (backend -> frontend):
+
+```json
+{
+  "type": "classify",
+  "body": {
+    "predictions": [
+      { "label": "Apple A", "confidence": 92.3 },
+      { "label": "peach", "confidence": 4.1 },
+      { "label": "tomatoes", "confidence": 2.0 },
+      { "label": "plum", "confidence": 1.2 }
+    ]
+  }
+}
+```
+
+## Supported Products
+
+| Product   | Backend Label | Price (MDL/kg) |
+| --------- | ------------- | -------------- |
+| Apple     | Apple A       | 2.80           |
+| Kiwi      | Kiwi B        | 5.50           |
+| Banana    | banana        | 3.50           |
+| Orange    | orange        | 3.20           |
+| Peach     | peach         | 4.80           |
+| Persimmon | persimmon     | 7.00           |
+| Plum      | plum          | 3.80           |
+| Tomato    | tomatoes      | 4.20           |

@@ -46,26 +46,24 @@ function findProductByLabel(label) {
   return PRODUCTS.find(p => p.id === id) ?? PRODUCTS[0]
 }
 
-// Top product from backend + 3 random alternatives with fake confidence scores
+// Top product from backend + 2 random alternatives with fake confidence scores
 function generateCandidatesFrom(topProduct) {
   const rest = PRODUCTS
     .filter(p => p.id !== topProduct.id)
     .sort(() => Math.random() - 0.5)
-    .slice(0, 3)
+    .slice(0, 2)
 
   const topConf = 85 + Math.floor(Math.random() * 12)
   const rem = 100 - topConf
   const scores = [
-    Math.floor(rem * 0.50),
-    Math.floor(rem * 0.30),
-    Math.floor(rem * 0.20),
+    Math.floor(rem * 0.60),
+    Math.floor(rem * 0.40),
   ].sort((a, b) => b - a)
 
   return [
     { ...topProduct, confidence: topConf  },
     { ...rest[0],    confidence: scores[0] },
     { ...rest[1],    confidence: scores[1] },
-    { ...rest[2],    confidence: scores[2] },
   ]
 }
 
@@ -340,7 +338,7 @@ function CandidatesScreen({ candidates, weight, onSelect, onBack }) {
 
       {/* Candidate cards */}
       <div className="flex-1 flex items-center px-6 py-5 overflow-hidden">
-        <div className="w-full grid gap-5" style={{ gridTemplateColumns: 'repeat(4, 1fr)' }}>
+        <div className="w-full grid gap-5" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
           {candidates.map(candidate => {
             const isSelected = selected === candidate.id
             const isDimmed   = selected !== null && !isSelected
@@ -654,8 +652,24 @@ export default function App() {
   // ── Classify result from backend ──────────────────────────────────────
   const handleClassifyResult = useCallback((body) => {
     if (demoModeRef.current) return
-    const topProduct = findProductByLabel(body.label)
-    setCandidates(generateCandidatesFrom(topProduct))
+
+    if (body.predictions && body.predictions.length > 0) {
+      const mapped = body.predictions.slice(0, 3).map(p => ({
+        ...findProductByLabel(p.label),
+        confidence: Math.round(p.confidence),
+      }))
+      while (mapped.length < 3) {
+        const used = new Set(mapped.map(m => m.id))
+        const filler = PRODUCTS.find(p => !used.has(p.id))
+        if (!filler) break
+        mapped.push({ ...filler, confidence: 0 })
+      }
+      setCandidates(mapped)
+    } else {
+      const topProduct = findProductByLabel(body.label)
+      setCandidates(generateCandidatesFrom(topProduct))
+    }
+
     setScreen(SCREEN.CANDIDATES)
   }, [])
 

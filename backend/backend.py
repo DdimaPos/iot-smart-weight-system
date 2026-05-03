@@ -107,13 +107,18 @@ def classify_image(frame):
     with torch.no_grad():
         outputs = model(img)
         probs = torch.softmax(outputs, dim=1)
-        top_prob, top_idx = torch.max(probs, dim=1)
+        top3_probs, top3_idxs = torch.topk(probs, k=min(3, NUM_CLASSES), dim=1)
 
-    idx = int(top_idx.item())
-    return {
-        "id": idx,
-        "label": CLASS_NAMES[idx]
-    }
+    predictions = []
+    for i in range(top3_idxs.shape[1]):
+        idx = int(top3_idxs[0, i].item())
+        conf = float(top3_probs[0, i].item()) * 100
+        predictions.append({
+            "label": CLASS_NAMES[idx],
+            "confidence": round(conf, 1),
+        })
+
+    return {"predictions": predictions}
 
 # -------------------------
 # FASTAPI SETUP
