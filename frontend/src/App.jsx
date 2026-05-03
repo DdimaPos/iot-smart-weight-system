@@ -9,118 +9,114 @@ const SCREEN = {
   CONFIRMED:  'CONFIRMED',
 }
 
+const WS_URL              = 'ws://localhost:5000/communication'
+const WEIGHT_DIVISOR      = 1000    // serial sends grams → convert to kg
+const WEIGHT_THRESHOLD    = 0.05    // kg (50 g) — below this = nothing on scale
+const STABLE_WINDOW_MS    = 1000    // ms of readings needed for stability check
+const STABLE_TOLERANCE_G  = 0.05    // grams — admissible variation band (±0.05 g)
+const STABLE_TOLERANCE    = STABLE_TOLERANCE_G / WEIGHT_DIVISOR  // = 0.00005 kg
+const FALLBACK_TIMEOUT_MS = 4000    // ms — classify with median reading if sensor never settles
+
+// All 8 classes the backend CNN can output
 const PRODUCTS = [
-  {
-    id: 'apple',
-    name: 'Măr',
-    variety: 'Red Delicious',
-    emoji: '🍎',
-    color: '#c0392b',
-    bg: '#fdf0ef',
-    border: '#f5c6c3',
-    pricePerKg: 2.80,
-  },
-  {
-    id: 'banana',
-    name: 'Banană',
-    variety: 'Cavendish',
-    emoji: '🍌',
-    color: '#d68910',
-    bg: '#fef9ec',
-    border: '#fde8a5',
-    pricePerKg: 3.50,
-  },
-  {
-    id: 'tomato',
-    name: 'Roșie',
-    variety: 'Rotundă',
-    emoji: '🍅',
-    color: '#a93226',
-    bg: '#fdf0ef',
-    border: '#f5c6c3',
-    pricePerKg: 4.20,
-  },
-  {
-    id: 'carrot',
-    name: 'Morcov',
-    variety: 'Portocaliu',
-    emoji: '🥕',
-    color: '#ca6f1e',
-    bg: '#fef6ec',
-    border: '#fddba5',
-    pricePerKg: 1.90,
-  },
-  {
-    id: 'grape',
-    name: 'Strugure',
-    variety: 'Muscat Alb',
-    emoji: '🍇',
-    color: '#7d3c98',
-    bg: '#f5f0fb',
-    border: '#d7bef0',
-    pricePerKg: 6.00,
-  },
+  { id: 'apple',     name: 'Măr',       variety: 'Red Delicious', emoji: '🍎', color: '#c0392b', bg: '#fdf0ef', border: '#f5c6c3', pricePerKg: 2.80 },
+  { id: 'kiwi',      name: 'Kiwi',      variety: 'Green Kiwi',   emoji: '🥝', color: '#5d8a1c', bg: '#f2f8e8', border: '#c8e09a', pricePerKg: 5.50 },
+  { id: 'banana',    name: 'Banană',    variety: 'Cavendish',    emoji: '🍌', color: '#d68910', bg: '#fef9ec', border: '#fde8a5', pricePerKg: 3.50 },
+  { id: 'orange',    name: 'Portocală', variety: 'Navel',        emoji: '🍊', color: '#d35400', bg: '#fef3ec', border: '#fcd9b5', pricePerKg: 3.20 },
+  { id: 'peach',     name: 'Piersică',  variety: 'Galbenă',      emoji: '🍑', color: '#e08010', bg: '#fef7ec', border: '#fde3b0', pricePerKg: 4.80 },
+  { id: 'persimmon', name: 'Kaki',      variety: 'Japonez',      emoji: '🟠', color: '#c05000', bg: '#fef2e8', border: '#f9c8a0', pricePerKg: 7.00 },
+  { id: 'plum',      name: 'Prună',     variety: 'Stanley',      emoji: '🫐', color: '#6c3483', bg: '#f4eef9', border: '#d2b4de', pricePerKg: 3.80 },
+  { id: 'tomato',    name: 'Roșie',     variety: 'Rotundă',      emoji: '🍅', color: '#a93226', bg: '#fdf0ef', border: '#f5c6c3', pricePerKg: 4.20 },
 ]
 
-// Generate 4 AI candidates for a given top product
-function generateCandidates(topProductId) {
-  const top = PRODUCTS.find(p => p.id === topProductId)
-  const rest = PRODUCTS.filter(p => p.id !== topProductId)
-    .sort(() => Math.random() - 0.5)
-    .slice(0, 3)
+// Maps backend CNN label (lowercase) → product id
+const BACKEND_LABEL_MAP = {
+  'apple a':   'apple',
+  'kiwi b':    'kiwi',
+  'banana':    'banana',
+  'orange':    'orange',
+  'peach':     'peach',
+  'persimmon': 'persimmon',
+  'plum':      'plum',
+  'tomatoes':  'tomato',
+}
 
-  const topConf = 85 + Math.floor(Math.random() * 12)   // 85–96
+function findProductByLabel(label) {
+  const id = BACKEND_LABEL_MAP[label?.toLowerCase()] ?? 'apple'
+  return PRODUCTS.find(p => p.id === id) ?? PRODUCTS[0]
+}
+
+// Top product from backend + 2 random alternatives with fake confidence scores
+function generateCandidatesFrom(topProduct) {
+  const rest = PRODUCTS
+    .filter(p => p.id !== topProduct.id)
+    .sort(() => Math.random() - 0.5)
+    .slice(0, 2)
+
+  const topConf = 85 + Math.floor(Math.random() * 12)
   const rem = 100 - topConf
   const scores = [
-    Math.floor(rem * 0.5),
-    Math.floor(rem * 0.3),
-    Math.floor(rem * 0.2),
+    Math.floor(rem * 0.60),
+    Math.floor(rem * 0.40),
   ].sort((a, b) => b - a)
 
   return [
-    { ...top,    confidence: topConf     },
-    { ...rest[0], confidence: scores[0]  },
-    { ...rest[1], confidence: scores[1]  },
-    { ...rest[2], confidence: scores[2]  },
+    { ...topProduct, confidence: topConf  },
+    { ...rest[0],    confidence: scores[0] },
+    { ...rest[1],    confidence: scores[1] },
   ]
 }
 
-// Animate weight 0 → target with overshoot settle
-function useAnimatedWeight(target, active) {
-  const [display, setDisplay] = useState(0)
-  const frame = useRef(null)
-  const t0 = useRef(null)
+// ─── BACKEND WEBSOCKET HOOK ──────────────────────────────────────────────────
+
+function useBackend({ onWeight, onClassify, onConnectionChange }) {
+  const wsRef     = useRef(null)
+  // Store callbacks in refs so the single WS setup effect never re-runs
+  const onWeightRef     = useRef(onWeight)
+  const onClassifyRef   = useRef(onClassify)
+  const onConnRef       = useRef(onConnectionChange)
+
+  useEffect(() => { onWeightRef.current   = onWeight         }, [onWeight])
+  useEffect(() => { onClassifyRef.current = onClassify       }, [onClassify])
+  useEffect(() => { onConnRef.current     = onConnectionChange }, [onConnectionChange])
+
+  const sendClassify = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'classify' }))
+    }
+  }, [])
 
   useEffect(() => {
-    if (!active || target === 0) { setDisplay(0); return }
+    let ws
+    let retryTimer
 
-    t0.current = null
-    const DURATION = 1100
-    const OVER = target * 0.04
+    function connect() {
+      ws = new WebSocket(WS_URL)
+      wsRef.current = ws
 
-    function step(ts) {
-      if (!t0.current) t0.current = ts
-      const t = Math.min((ts - t0.current) / DURATION, 1)
-
-      let v
-      if (t < 0.85) {
-        const ease = 1 - Math.pow(1 - t / 0.85, 3)
-        v = (target + OVER) * ease
-      } else {
-        const settle = (t - 0.85) / 0.15
-        v = target + OVER * (1 - settle)
+      ws.onopen  = () => onConnRef.current?.(true)
+      ws.onclose = () => {
+        onConnRef.current?.(false)
+        retryTimer = setTimeout(connect, 3000)
       }
-
-      setDisplay(Math.max(0, v))
-      if (t < 1) frame.current = requestAnimationFrame(step)
-      else setDisplay(target)
+      ws.onerror = () => {}
+      ws.onmessage = (e) => {
+        try {
+          const msg = JSON.parse(e.data)
+          if (msg.type === 'weigh')    onWeightRef.current?.(msg.body.weight)
+          if (msg.type === 'classify') onClassifyRef.current?.(msg.body)
+        } catch { /* malformed frame — ignore */ }
+      }
     }
 
-    frame.current = requestAnimationFrame(step)
-    return () => cancelAnimationFrame(frame.current)
-  }, [target, active])
+    connect()
+    return () => {
+      clearTimeout(retryTimer)
+      ws?.close()
+    }
+  }, []) // intentionally empty — connect once, use refs for callbacks
 
-  return display
+  return { sendClassify }
 }
 
 // ─── SHARED WIDGETS ──────────────────────────────────────────────────────────
@@ -149,22 +145,22 @@ function WeightBadge({ weight, large = false }) {
 }
 
 function Spinner({ size = 48 }) {
-  const r = 20
+  const r    = 20
   const circ = 2 * Math.PI * r
   return (
-    <svg width={size} height={size} viewBox="0 0 48 48" className="animate-spin" style={{ animationDuration: '1.1s' }}>
+    <svg width={size} height={size} viewBox="0 0 48 48"
+      className="animate-spin" style={{ animationDuration: '1.1s' }}>
       <circle cx="24" cy="24" r={r} fill="none" stroke="#c9d9c9" strokeWidth="4" />
       <circle cx="24" cy="24" r={r} fill="none" stroke="#568056" strokeWidth="4"
         strokeLinecap="round"
-        strokeDasharray={`${circ * 0.28} ${circ * 0.72}`}
-      />
+        strokeDasharray={`${circ * 0.28} ${circ * 0.72}`} />
     </svg>
   )
 }
 
 // ─── SCREEN 1: WAITING ───────────────────────────────────────────────────────
 
-function WaitingScreen() {
+function WaitingScreen({ wsConnected }) {
   const steps = [
     { icon: '🛒', label: 'Puneți produsul\npe cântar',   anim: 'float-1' },
     { icon: '⚖️', label: 'Greutatea\nse stabilizează',   anim: 'float-2' },
@@ -180,26 +176,28 @@ function WaitingScreen() {
         <div className="text-5xl mb-1">🌿</div>
         <h1 className="text-4xl font-bold text-sage-800 tracking-tight">Casă de Plată Inteligentă</h1>
         <p className="text-xl text-sage-500 font-medium">Puneți produsul pe cântar pentru a începe</p>
+
+        {/* Backend connection status */}
+        <div className={`mt-2 flex items-center gap-2 px-4 py-1.5 rounded-full text-sm font-semibold
+          ${wsConnected
+            ? 'bg-sage-100 text-sage-600 border border-sage-200'
+            : 'bg-warm-100 text-warm-500 border border-warm-200'}`}>
+          <span className={`w-2 h-2 rounded-full ${wsConnected ? 'bg-sage-400 animate-pulse-soft' : 'bg-warm-300'}`} />
+          {wsConnected ? 'Cântar conectat' : 'Cântar deconectat — folosiți modul Demo'}
+        </div>
       </div>
 
       {/* Step guide */}
       <div className="flex items-start justify-center gap-4 w-full max-w-2xl">
         {steps.map((step, i) => (
           <div key={i} className="flex-1 flex flex-col items-center gap-3">
-            {/* Icon bubble */}
             <div className={`${step.anim} w-20 h-20 rounded-3xl bg-white card-shadow border border-sage-100
               flex items-center justify-center text-4xl`}>
               {step.icon}
             </div>
-            {/* Connector arrow */}
-            {i < steps.length - 1 && (
-              <div className="hidden" />
-            )}
-            {/* Step badge */}
             <div className="w-7 h-7 rounded-full bg-sage-400 flex items-center justify-center text-white text-sm font-bold shadow">
               {i + 1}
             </div>
-            {/* Label */}
             <p className="text-center text-sage-600 font-medium text-base leading-snug whitespace-pre-line">
               {step.label}
             </p>
@@ -207,10 +205,10 @@ function WaitingScreen() {
         ))}
       </div>
 
-      {/* Arrows between icons — overlaid on top of step row */}
+      {/* Arrows between icons */}
       <div className="flex justify-center gap-4 w-full max-w-2xl -mt-40 mb-24 pointer-events-none" aria-hidden="true">
         {[0, 1, 2].map(i => (
-          <div key={i} className="flex-1 flex justify-end items-start pt-8 pr-0">
+          <div key={i} className="flex-1 flex justify-end items-start pt-8">
             <svg width="28" height="18" viewBox="0 0 28 18" fill="none">
               <path d="M2 9h22M18 3l6 6-6 6" stroke="#a3bfa3" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
@@ -236,13 +234,11 @@ function WeighingScreen({ liveWeight }) {
   return (
     <div className="screen-enter h-full flex flex-col items-center justify-center gap-10 bg-warm-50 px-8">
 
-      {/* Scale icon */}
       <div className="w-32 h-32 rounded-full bg-white card-shadow border border-sage-100
         flex items-center justify-center text-7xl animate-bounce-soft">
         ⚖️
       </div>
 
-      {/* Live weight display */}
       <div className="flex flex-col items-center gap-3">
         <p className="text-xl font-semibold text-sage-600">Se măsoară greutatea…</p>
         <div className="bg-white rounded-3xl card-shadow border border-sage-200 px-10 py-6 flex items-center gap-3">
@@ -254,7 +250,6 @@ function WeighingScreen({ liveWeight }) {
         </div>
       </div>
 
-      {/* Processing */}
       <div className="flex flex-col items-center gap-4">
         <Spinner size={56} />
         <p className="text-xl font-semibold text-sage-700">Se identifică produsul…</p>
@@ -296,12 +291,12 @@ function CandidatesScreen({ candidates, weight, onSelect, onBack }) {
   const showCountdown = timeLeft <= 8
   const RING_R    = 24
   const RING_CIRC = 2 * Math.PI * RING_R
-  const ringOffset = RING_CIRC * (timeLeft / IDLE_TIMEOUT)  // drains to 0
+  const ringOffset = RING_CIRC * (timeLeft / IDLE_TIMEOUT)
 
   return (
     <div className="screen-enter h-full flex flex-col bg-warm-50">
 
-      {/* ── Top bar ── */}
+      {/* Top bar */}
       <div className="shrink-0 flex items-center justify-between px-6 pt-5 pb-4 bg-white border-b border-sage-100">
         <div className="flex items-center gap-3">
           <WeightBadge weight={weight} />
@@ -313,16 +308,11 @@ function CandidatesScreen({ candidates, weight, onSelect, onBack }) {
             <div className="flex items-center gap-2 bg-warm-50 border border-warm-300 rounded-2xl px-4 py-2 animate-fade-in">
               <svg width={56} height={56} className="-my-1.5">
                 <circle cx="28" cy="28" r={RING_R} fill="none" stroke="#fddba5" strokeWidth="3.5" />
-                <circle
-                  cx="28" cy="28" r={RING_R} fill="none" stroke="#e67e22" strokeWidth="3.5"
+                <circle cx="28" cy="28" r={RING_R} fill="none" stroke="#e67e22" strokeWidth="3.5"
                   strokeLinecap="round"
                   strokeDasharray={RING_CIRC}
                   strokeDashoffset={RING_CIRC - ringOffset}
-                  style={{
-                    transform: 'rotate(-90deg)',
-                    transformOrigin: '28px 28px',
-                    transition: 'stroke-dashoffset 0.95s linear',
-                  }}
+                  style={{ transform: 'rotate(-90deg)', transformOrigin: '28px 28px', transition: 'stroke-dashoffset 0.95s linear' }}
                 />
                 <text x="28" y="33" textAnchor="middle" fontSize="14" fontWeight="700" fill="#ca7848">
                   {timeLeft}
@@ -346,10 +336,9 @@ function CandidatesScreen({ candidates, weight, onSelect, onBack }) {
         </div>
       </div>
 
-      {/* ── Candidate cards ── */}
+      {/* Candidate cards */}
       <div className="flex-1 flex items-center px-6 py-5 overflow-hidden">
-        <div className="w-full grid gap-5"
-          style={{ gridTemplateColumns: 'repeat(4, 1fr)' }}>
+        <div className="w-full grid gap-5" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
           {candidates.map(candidate => {
             const isSelected = selected === candidate.id
             const isDimmed   = selected !== null && !isSelected
@@ -366,16 +355,14 @@ function CandidatesScreen({ candidates, weight, onSelect, onBack }) {
                     ? 'opacity-30 scale-95 pointer-events-none bg-white border-sage-100'
                     : isSelected
                       ? 'border-sage-400 ring-4 ring-sage-200 scale-105'
-                      : 'bg-white border-sage-100 card-shadow active:scale-95 active:card-shadow-hover'
+                      : 'bg-white border-sage-100 card-shadow active:scale-95'
                   }
                 `}
                 style={isSelected ? { background: candidate.bg } : {}}
               >
-                {/* Emoji illustration */}
-                <div
-                  className="w-24 h-24 rounded-2xl flex items-center justify-center text-6xl"
-                  style={{ background: candidate.bg, border: `2px solid ${candidate.border}` }}
-                >
+                {/* Emoji */}
+                <div className="w-24 h-24 rounded-2xl flex items-center justify-center text-6xl"
+                  style={{ background: candidate.bg, border: `2px solid ${candidate.border}` }}>
                   {candidate.emoji}
                 </div>
 
@@ -385,20 +372,18 @@ function CandidatesScreen({ candidates, weight, onSelect, onBack }) {
                   <div className="text-sm text-sage-400 font-medium mt-0.5">{candidate.variety}</div>
                 </div>
 
-                {/* Confidence badge */}
-                <div
-                  className="px-4 py-1.5 rounded-full text-sm font-bold"
-                  style={{ background: candidate.bg, color: candidate.color, border: `1.5px solid ${candidate.border}` }}
-                >
+                {/* Confidence */}
+                <div className="px-4 py-1.5 rounded-full text-sm font-bold"
+                  style={{ background: candidate.bg, color: candidate.color, border: `1.5px solid ${candidate.border}` }}>
                   {candidate.confidence}% potrivire
                 </div>
 
-                {/* Price */}
+                {/* Price per kg */}
                 <div className="text-base text-sage-400 font-medium">
                   {candidate.pricePerKg.toFixed(2)} MDL/kg
                 </div>
 
-                {/* Selected checkmark */}
+                {/* Checkmark when selected */}
                 {isSelected && (
                   <div className="absolute top-4 right-4 w-9 h-9 rounded-full bg-sage-400
                     flex items-center justify-center animate-scale-in shadow-md">
@@ -414,7 +399,7 @@ function CandidatesScreen({ candidates, weight, onSelect, onBack }) {
         </div>
       </div>
 
-      {/* ── Bottom hint ── */}
+      {/* Bottom hint */}
       <div className="shrink-0 pb-5 flex justify-center">
         <p className="text-base text-sage-400 font-medium">
           {selected ? 'Se confirmă selecția…' : 'Apăsați cardul care corespunde produsului dvs.'}
@@ -430,21 +415,20 @@ function ConfirmationScreen({ product, weight, sessionStart, onReset }) {
   const total = (product.pricePerKg * weight).toFixed(2)
 
   useEffect(() => {
-    const analytics = {
-      product:          product.name,
-      variety:          product.variety,
-      weight:           parseFloat(weight.toFixed(3)),
-      unitPriceMDL:     product.pricePerKg,
-      totalPriceMDL:    parseFloat(total),
+    console.log('[SmartScale] Sesiune finalizată:', {
+      produs:           product.name,
+      soi:              product.variety,
+      greutate_kg:      parseFloat(weight.toFixed(3)),
+      pretUnitar_MDL:   product.pricePerKg,
+      pretTotal_MDL:    parseFloat(total),
       timestamp:        new Date().toISOString(),
-      sessionDurationMs: Date.now() - sessionStart,
-    }
-    console.log('[SmartScale] Session complete:', analytics)
+      durata_ms:        Date.now() - sessionStart,
+    })
   }, [])
 
   const now     = new Date()
-  const timeStr = now.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
-  const dateStr = now.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
+  const timeStr = now.toLocaleTimeString('ro-RO', { hour: '2-digit', minute: '2-digit' })
+  const dateStr = now.toLocaleDateString('ro-RO', { day: '2-digit', month: 'short', year: 'numeric' })
 
   return (
     <div className="screen-enter h-full flex flex-col items-center justify-between bg-warm-50 px-8 py-10 gap-6">
@@ -463,13 +447,15 @@ function ConfirmationScreen({ product, weight, sessionStart, onReset }) {
         <p className="text-xl text-sage-500">Iată chitanța dumneavoastră</p>
       </div>
 
-      {/* Receipt card */}
+      {/* Receipt */}
       <div className="w-full max-w-md receipt-bg rounded-3xl border border-warm-200 overflow-hidden card-shadow animate-slide-up">
 
         {/* Header strip */}
         <div className="px-8 py-6 flex items-center gap-5"
-          style={{ background: `linear-gradient(135deg, ${product.color}22 0%, ${product.color}11 100%)`,
-                   borderBottom: `2px solid ${product.border}` }}>
+          style={{
+            background: `linear-gradient(135deg, ${product.color}22 0%, ${product.color}11 100%)`,
+            borderBottom: `2px solid ${product.border}`,
+          }}>
           <span className="text-6xl">{product.emoji}</span>
           <div>
             <div className="text-3xl font-bold text-sage-800">{product.name}</div>
@@ -479,20 +465,19 @@ function ConfirmationScreen({ product, weight, sessionStart, onReset }) {
 
         {/* Line items */}
         <div className="px-8 py-6 flex flex-col gap-4">
-          <ReceiptRow label="Greutate"      value={`${weight.toFixed(3)} kg`} />
+          <ReceiptRow label="Greutate"     value={`${weight.toFixed(3)} kg`} />
           <ReceiptRow label="Preț unitar"  value={`${product.pricePerKg.toFixed(2)} MDL / kg`} />
           <div className="border-t-2 border-dashed border-warm-200" />
           <ReceiptRow label="Total" value={`${total} MDL`} bold />
         </div>
 
-        {/* Receipt footer */}
         <div className="border-t-2 border-dashed border-warm-200 mx-6" />
         <div className="px-8 py-4 text-center text-warm-400 text-sm font-medium">
           {dateStr} · {timeStr} · Cântar Inteligent v1.0
         </div>
       </div>
 
-      {/* New item button */}
+      {/* New item */}
       <button
         onClick={onReset}
         className="touch-safe w-full max-w-md bg-sage-500 text-white text-xl font-bold
@@ -507,7 +492,7 @@ function ConfirmationScreen({ product, weight, sessionStart, onReset }) {
 function ReceiptRow({ label, value, bold = false }) {
   return (
     <div className="flex justify-between items-center">
-      <span className={`${bold ? 'text-xl font-bold text-warm-700' : 'text-lg font-medium text-warm-500'}`}>
+      <span className={bold ? 'text-xl font-bold text-warm-700' : 'text-lg font-medium text-warm-500'}>
         {label}
       </span>
       <span className={`tabular-nums ${bold ? 'text-2xl font-bold text-sage-700' : 'text-lg font-semibold text-warm-800'}`}>
@@ -520,7 +505,7 @@ function ReceiptRow({ label, value, bold = false }) {
 // ─── DEMO PANEL ──────────────────────────────────────────────────────────────
 
 function DemoPanel({ onTrigger, currentScreen }) {
-  const [open, setOpen] = useState(false)
+  const [open, setOpen]     = useState(false)
   const [chosen, setChosen] = useState('apple')
   const isIdle = currentScreen === SCREEN.IDLE
 
@@ -577,29 +562,161 @@ function DemoPanel({ onTrigger, currentScreen }) {
 
 export default function App() {
   const [screen, setScreen]               = useState(SCREEN.IDLE)
-  const [targetWeight, setTargetWeight]   = useState(0)
+  const [liveWeight, setLiveWeight]       = useState(0)
   const [stableWeight, setStableWeight]   = useState(0)
   const [candidates, setCandidates]       = useState([])
   const [selectedProduct, setSelectedProduct] = useState(null)
   const [sessionStart, setSessionStart]   = useState(null)
+  const [wsConnected, setWsConnected]     = useState(false)
 
-  const animWeight = useAnimatedWeight(targetWeight, screen === SCREEN.WEIGHING)
+  // Refs to avoid stale closures inside async WS callbacks
+  const screenRef        = useRef(screen)
+  const weightHistoryRef = useRef([])     // { w: kg, t: ms } rolling window
+  const classifySentRef  = useRef(false)
+  const demoModeRef      = useRef(false)
+  const demoFrameRef     = useRef(null)
+  const sendClassifyRef  = useRef(null)   // populated after useBackend call below
 
-  // ── Start a demo session ──────────────────────────────────────────────
+  useEffect(() => { screenRef.current = screen }, [screen])
+
+  // ── Shared helper: mark weight stable and fire classify ──────────────
+  const triggerClassify = useCallback((weightKg) => {
+    if (classifySentRef.current) return
+    classifySentRef.current = true
+    setStableWeight(parseFloat(weightKg.toFixed(3)))
+    sendClassifyRef.current?.()
+  }, [])
+
+  // ── Weight update from hardware (called 10×/s by WS) ─────────────────
+  const handleWeightUpdate = useCallback((rawGrams) => {
+    if (demoModeRef.current) return
+
+    const weightKg = rawGrams / WEIGHT_DIVISOR   // grams → kg
+    setLiveWeight(weightKg)
+    const s = screenRef.current
+
+    if (weightKg < WEIGHT_THRESHOLD) {
+      weightHistoryRef.current = []
+      classifySentRef.current  = false
+      if (s === SCREEN.WEIGHING) setScreen(SCREEN.IDLE)
+      return
+    }
+
+    if (s === SCREEN.IDLE) {
+      setScreen(SCREEN.WEIGHING)
+      setSessionStart(Date.now())
+      weightHistoryRef.current = []
+      classifySentRef.current  = false
+    }
+
+    if (s === SCREEN.WEIGHING && !classifySentRef.current) {
+      const now = Date.now()
+      weightHistoryRef.current.push({ w: weightKg, t: now })
+
+      // Keep only readings inside 1.5× the stability window
+      const cutoff = now - STABLE_WINDOW_MS * 1.5
+      weightHistoryRef.current = weightHistoryRef.current.filter(r => r.t >= cutoff)
+
+      const history = weightHistoryRef.current
+      const span    = history.length > 1
+        ? history[history.length - 1].t - history[0].t
+        : 0
+
+      if (span >= STABLE_WINDOW_MS) {
+        // Median-based check — robust against spike outliers from bad sensors
+        const vals   = history.map(r => r.w).sort((a, b) => a - b)
+        const median = vals[Math.floor(vals.length / 2)]
+        const maxDev = Math.max(...vals.map(v => Math.abs(v - median)))
+
+        if (maxDev <= STABLE_TOLERANCE) {
+          triggerClassify(median)
+        }
+      }
+    }
+  }, [triggerClassify])
+
+  // ── Fallback: classify after FALLBACK_TIMEOUT_MS even if sensor never fully settles
+  useEffect(() => {
+    if (screen !== SCREEN.WEIGHING) return
+    const timer = setTimeout(() => {
+      if (classifySentRef.current || demoModeRef.current) return
+      const history = weightHistoryRef.current
+      if (history.length === 0) return
+      const vals   = history.map(r => r.w).sort((a, b) => a - b)
+      const median = vals[Math.floor(vals.length / 2)]
+      triggerClassify(median)
+    }, FALLBACK_TIMEOUT_MS)
+    return () => clearTimeout(timer)
+  }, [screen, triggerClassify])
+
+  // ── Classify result from backend ──────────────────────────────────────
+  const handleClassifyResult = useCallback((body) => {
+    if (demoModeRef.current) return
+
+    if (body.predictions && body.predictions.length > 0) {
+      const mapped = body.predictions.slice(0, 3).map(p => ({
+        ...findProductByLabel(p.label),
+        confidence: Math.round(p.confidence),
+      }))
+      while (mapped.length < 3) {
+        const used = new Set(mapped.map(m => m.id))
+        const filler = PRODUCTS.find(p => !used.has(p.id))
+        if (!filler) break
+        mapped.push({ ...filler, confidence: 0 })
+      }
+      setCandidates(mapped)
+    } else {
+      const topProduct = findProductByLabel(body.label)
+      setCandidates(generateCandidatesFrom(topProduct))
+    }
+
+    setScreen(SCREEN.CANDIDATES)
+  }, [])
+
+  const { sendClassify } = useBackend({
+    onWeight:           handleWeightUpdate,
+    onClassify:         handleClassifyResult,
+    onConnectionChange: setWsConnected,
+  })
+  // Keep the ref current so triggerClassify can always reach it
+  sendClassifyRef.current = sendClassify
+
+  // ── Demo trigger (simulates hardware, no real WS needed) ─────────────
   const handleDemoTrigger = useCallback((productId) => {
-    if (screen !== SCREEN.IDLE) return
+    if (screenRef.current !== SCREEN.IDLE) return
 
-    const weight = parseFloat((0.1 + Math.random() * 1.1).toFixed(3))
+    demoModeRef.current = true
+    const targetW = parseFloat((0.1 + Math.random() * 1.1).toFixed(3))
+    const OVER    = targetW * 0.04
+    const DURATION = 1100
+    const start   = performance.now()
 
     setSessionStart(Date.now())
-    setTargetWeight(weight)
-    setStableWeight(weight)
-    setCandidates(generateCandidates(productId))
+    setStableWeight(targetW)
+    setCandidates(generateCandidatesFrom(PRODUCTS.find(p => p.id === productId)))
     setScreen(SCREEN.WEIGHING)
 
-    // weight settles ~1.1s + AI inference 600ms
-    setTimeout(() => setScreen(SCREEN.CANDIDATES), 1750)
-  }, [screen])
+    // Animate weight for visual effect
+    function animateDemo(ts) {
+      const t = Math.min((ts - start) / DURATION, 1)
+      let v
+      if (t < 0.85) {
+        const ease = 1 - Math.pow(1 - t / 0.85, 3)
+        v = (targetW + OVER) * ease
+      } else {
+        v = targetW + OVER * (1 - (t - 0.85) / 0.15)
+      }
+      setLiveWeight(Math.max(0, v))
+      if (t < 1) {
+        demoFrameRef.current = requestAnimationFrame(animateDemo)
+      } else {
+        setLiveWeight(targetW)
+        // Transition to candidates after weight settles + simulated AI delay
+        setTimeout(() => setScreen(SCREEN.CANDIDATES), 650)
+      }
+    }
+    demoFrameRef.current = requestAnimationFrame(animateDemo)
+  }, [])
 
   // ── User tapped a candidate ───────────────────────────────────────────
   const handleSelect = useCallback((product) => {
@@ -609,14 +726,20 @@ export default function App() {
 
   // ── Reset everything ──────────────────────────────────────────────────
   const handleReset = useCallback(() => {
+    cancelAnimationFrame(demoFrameRef.current)
+    demoModeRef.current       = false
+    weightHistoryRef.current  = []
+    classifySentRef.current   = false
+
     setScreen(SCREEN.IDLE)
-    setTargetWeight(0)
+    setLiveWeight(0)
     setStableWeight(0)
     setCandidates([])
     setSelectedProduct(null)
     setSessionStart(null)
   }, [])
 
+  // ── Render ────────────────────────────────────────────────────────────
   return (
     <div
       className="relative w-screen h-screen overflow-hidden"
@@ -624,10 +747,10 @@ export default function App() {
       onContextMenu={e => e.preventDefault()}
     >
       {screen === SCREEN.IDLE && (
-        <WaitingScreen key="idle" />
+        <WaitingScreen key="idle" wsConnected={wsConnected} />
       )}
       {screen === SCREEN.WEIGHING && (
-        <WeighingScreen key="weighing" liveWeight={animWeight} />
+        <WeighingScreen key="weighing" liveWeight={liveWeight} />
       )}
       {screen === SCREEN.CANDIDATES && (
         <CandidatesScreen
