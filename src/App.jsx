@@ -9,10 +9,13 @@ const SCREEN = {
   CONFIRMED:  'CONFIRMED',
 }
 
-const WS_URL           = 'ws://localhost:5000/communication'
-const WEIGHT_THRESHOLD = 0.05   // kg  — below this = nothing on scale
-const STABLE_WINDOW_MS = 1000   // ms  — how long weight must be stable
-const STABLE_TOLERANCE = 0.005  // kg  — max variance to be "stable"
+const WS_URL              = 'ws://localhost:5000/communication'
+const WEIGHT_DIVISOR      = 1000    // serial sends grams → convert to kg
+const WEIGHT_THRESHOLD    = 0.05    // kg (50 g) — below this = nothing on scale
+const STABLE_WINDOW_MS    = 1000    // ms of readings needed for stability check
+const STABLE_TOLERANCE_G  = 0.05    // grams — admissible variation band (±0.05 g)
+const STABLE_TOLERANCE    = STABLE_TOLERANCE_G / WEIGHT_DIVISOR  // = 0.00005 kg
+const FALLBACK_TIMEOUT_MS = 4000    // ms — classify with median reading if sensor never settles
 
 // All 8 classes the backend CNN can output
 const PRODUCTS = [
@@ -568,32 +571,39 @@ export default function App() {
   const [sessionStart, setSessionStart]   = useState(null)
   const [wsConnected, setWsConnected]     = useState(false)
 
-  // Refs used inside WebSocket callback to avoid stale closures
-  const screenRef           = useRef(screen)
-  const weightHistoryRef    = useRef([])   // { w, t } rolling window
-  const classifySentRef     = useRef(false)
-  const demoModeRef         = useRef(false) // true while a demo session is running
-  const demoFrameRef        = useRef(null)
+  // Refs to avoid stale closures inside async WS callbacks
+  const screenRef        = useRef(screen)
+  const weightHistoryRef = useRef([])     // { w: kg, t: ms } rolling window
+  const classifySentRef  = useRef(false)
+  const demoModeRef      = useRef(false)
+  const demoFrameRef     = useRef(null)
+  const sendClassifyRef  = useRef(null)   // populated after useBackend call below
 
   useEffect(() => { screenRef.current = screen }, [screen])
 
-  // ── Weight stability detection & auto-flow ───────────────────────────
-  const handleWeightUpdate = useCallback((rawWeight) => {
-    // Ignore hardware weight while a demo session is active
+  // ── Shared helper: mark weight stable and fire classify ──────────────
+  const triggerClassify = useCallback((weightKg) => {
+    if (classifySentRef.current) return
+    classifySentRef.current = true
+    setStableWeight(parseFloat(weightKg.toFixed(3)))
+    sendClassifyRef.current?.()
+  }, [])
+
+  // ── Weight update from hardware (called 10×/s by WS) ─────────────────
+  const handleWeightUpdate = useCallback((rawGrams) => {
     if (demoModeRef.current) return
 
-    setLiveWeight(rawWeight)
+    const weightKg = rawGrams / WEIGHT_DIVISOR   // grams → kg
+    setLiveWeight(weightKg)
     const s = screenRef.current
 
-    if (rawWeight < WEIGHT_THRESHOLD) {
-      // Nothing on scale — reset history
+    if (weightKg < WEIGHT_THRESHOLD) {
       weightHistoryRef.current = []
       classifySentRef.current  = false
       if (s === SCREEN.WEIGHING) setScreen(SCREEN.IDLE)
       return
     }
 
-    // Item placed → start weighing
     if (s === SCREEN.IDLE) {
       setScreen(SCREEN.WEIGHING)
       setSessionStart(Date.now())
@@ -601,39 +611,51 @@ export default function App() {
       classifySentRef.current  = false
     }
 
-    // Track stability only in WEIGHING and only before classify is sent
     if (s === SCREEN.WEIGHING && !classifySentRef.current) {
       const now = Date.now()
-      weightHistoryRef.current.push({ w: rawWeight, t: now })
+      weightHistoryRef.current.push({ w: weightKg, t: now })
 
-      // Keep only readings within the stability window
+      // Keep only readings inside 1.5× the stability window
       const cutoff = now - STABLE_WINDOW_MS * 1.5
       weightHistoryRef.current = weightHistoryRef.current.filter(r => r.t >= cutoff)
 
       const history = weightHistoryRef.current
-      const span    = history.length > 1 ? history[history.length - 1].t - history[0].t : 0
+      const span    = history.length > 1
+        ? history[history.length - 1].t - history[0].t
+        : 0
 
       if (span >= STABLE_WINDOW_MS) {
-        const weights = history.map(r => r.w)
-        const range   = Math.max(...weights) - Math.min(...weights)
+        // Median-based check — robust against spike outliers from bad sensors
+        const vals   = history.map(r => r.w).sort((a, b) => a - b)
+        const median = vals[Math.floor(vals.length / 2)]
+        const maxDev = Math.max(...vals.map(v => Math.abs(v - median)))
 
-        if (range <= STABLE_TOLERANCE) {
-          // Weight is stable — record it and send classify request
-          const stable = parseFloat(rawWeight.toFixed(3))
-          setStableWeight(stable)
-          classifySentRef.current = true
-          sendClassify()
+        if (maxDev <= STABLE_TOLERANCE) {
+          triggerClassify(median)
         }
       }
     }
-  }, []) // sendClassify injected below via closure after hook call
+  }, [triggerClassify])
 
-  // ── Classify result from backend ─────────────────────────────────────
+  // ── Fallback: classify after FALLBACK_TIMEOUT_MS even if sensor never fully settles
+  useEffect(() => {
+    if (screen !== SCREEN.WEIGHING) return
+    const timer = setTimeout(() => {
+      if (classifySentRef.current || demoModeRef.current) return
+      const history = weightHistoryRef.current
+      if (history.length === 0) return
+      const vals   = history.map(r => r.w).sort((a, b) => a - b)
+      const median = vals[Math.floor(vals.length / 2)]
+      triggerClassify(median)
+    }, FALLBACK_TIMEOUT_MS)
+    return () => clearTimeout(timer)
+  }, [screen, triggerClassify])
+
+  // ── Classify result from backend ──────────────────────────────────────
   const handleClassifyResult = useCallback((body) => {
     if (demoModeRef.current) return
-    const topProduct  = findProductByLabel(body.label)
-    const cands       = generateCandidatesFrom(topProduct)
-    setCandidates(cands)
+    const topProduct = findProductByLabel(body.label)
+    setCandidates(generateCandidatesFrom(topProduct))
     setScreen(SCREEN.CANDIDATES)
   }, [])
 
@@ -642,6 +664,8 @@ export default function App() {
     onClassify:         handleClassifyResult,
     onConnectionChange: setWsConnected,
   })
+  // Keep the ref current so triggerClassify can always reach it
+  sendClassifyRef.current = sendClassify
 
   // ── Demo trigger (simulates hardware, no real WS needed) ─────────────
   const handleDemoTrigger = useCallback((productId) => {
